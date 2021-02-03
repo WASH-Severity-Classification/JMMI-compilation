@@ -3,6 +3,7 @@ library(readr)
 library(lubridate)
 library(purrr)
 library(readxl)
+library(tidyr)
 
 search_URL <- "https://www.reachresourcecentre.info/search/?search=1&initiative%5B%5D=reach&ptype%5B%5D=dataset-database&dates=&keywords=JMMI"
 all_URLs <- RC_extract_allPages(search_URL)
@@ -76,7 +77,8 @@ sheets_data <- c("median_WASH_SMEB_district", "Median item prices","Price per it
 
 countries_sheets <- data.frame(iso3_code = unique_countries, sheets_data=sheets_data)
 
-all_files_names_sheets <- left_join(all_files_names, countries_sheets, by = "iso3_code")
+all_files_names_sheets <- left_join(all_files_names, countries_sheets, by = "iso3_code") %>%
+  mutate(data_name = paste0(str_remove(file_name, ".xlsx$"), "_", date))
 
 write_csv(all_files_names_sheets, "all_files_available.csv")
 
@@ -87,10 +89,63 @@ read_excel_all <- function(file_path, sheet){
   if(sheet %in% all_sheets){
     read_excel(file_path, sheet = sheet)
   }else{
-    warning("oupsi, the sheet was not found in the file")
+    warning("oupsi, the sheet was not found in the file:", file_path)
+
   }
 }
 
-try <- map2(all_files_names$file_path, all_files_names_sheets$sheets_data, read_excel_all)
+all_files_names_sheets_corrected <- readr::read_csv("all_files_available_corrected.csv", col_types = cols())%>%
+  mutate(data_name = paste0(str_remove(file_name, ".xlsx$"), "_", date),
+         new_name = paste0("REACH_", iso3_code, "_JMMI_data_", date),
+         new_name = case_when(duplicated(new_name)~paste0(new_name,1),
+                              TRUE ~ new_name))
 
-names(try) <- all_files_names_sheets$file_name
+write_csv(all_files_names_sheets_corrected, "all_files_available_corrected.csv")
+
+list_dfs <- map2(all_files_names_sheets_corrected$file_path, all_files_names_sheets_corrected$sheets_data, read_excel_all)
+
+names(list_dfs) <- all_files_names_sheets_corrected$new_name
+
+country_list <- unique(all_files_names_sheets_corrected$iso3_code)
+
+single_csvs <- function(list_dfs, country){
+
+  all_files_names_sheets_corrected <- readr::read_csv("all_files_available_corrected.csv", col_types = cols())%>%
+    mutate(data_name = paste0(str_remove(file_name, ".xlsx$"), "_", date)) %>%
+    filter( iso3_code == country)
+
+  dfs_inCountry <- names(list_dfs)[names(list_dfs) %in% all_files_names_sheets_corrected$new_name]
+
+  classes <- lapply(list_dfs, class) %>%
+    bind_rows() %>%
+    tidyr::pivot_longer(cols = everything(), names_to = "file_name", values_to = "class") %>%
+    filter(class == "data.frame")
+
+  # class_files <- data.frame(class = unlist(classes), file_name = names(classes))
+  #
+  # class_files <- data.frame(class = unlist(lapply(list_dfs, class)), file_name = names(class)) %>%
+  #   tibble::rownames_to_column(var = "file_name") %>%
+  #   mutate(file_name = str_remove(file_name, "[0-9]$"))
+  #
+  # dfs_inCountry_good_class <- class_files %>%
+  #   filter(file_name %in% dfs_inCountry & class != "character") %>%
+  #   select(-class) %>%
+  #   distinct()
+
+  list_dfs_country <- list_dfs[classes$file_name]
+
+  if(!dir.exists("outputs")){
+    dir.create("outputs")
+  }
+  if(!dir.exists(paste0("outputs/", country))){
+    dir.create(paste0("outputs/", country))
+  }
+  name_files <- paste0("outputs/", country, "/",names(list_dfs_country), ".csv")
+  map2(list_dfs_country, name_files, write_csv)
+
+}
+
+
+for(i in 1:length(country_list)){
+  single_csvs(list_dfs, country_list[i])
+}
